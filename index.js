@@ -1,8 +1,10 @@
-// Miami Beach Resort - WhatsApp Service
+// Miami Beach Resort - WhatsApp Service v2
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -10,7 +12,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 8080;
 
-// Store connection state
+// State
 let qrCodeData = null;
 let connectionStatus = 'initializing';
 let clientInfo = null;
@@ -18,36 +20,50 @@ let lastError = null;
 let client = null;
 let initAttempts = 0;
 
-// Find Chrome/Chromium path
-function getChromePath() {
-    const paths = [
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/google-chrome',
-        process.env.PUPPETEER_EXECUTABLE_PATH
-    ];
-    const fs = require('fs');
-    for (const p of paths) {
-        if (p && fs.existsSync(p)) {
-            return p;
+// Clean session directory
+function cleanSession() {
+    const sessionPath = '/tmp/wa-session';
+    try {
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
         }
+        fs.mkdirSync(sessionPath, { recursive: true });
+    } catch (e) {
+        console.log('Session cleanup:', e.message);
+    }
+}
+
+// Find Chrome
+function getChromePath() {
+    const paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable'];
+    for (const p of paths) {
+        if (fs.existsSync(p)) return p;
     }
     return null;
 }
 
-// Initialize WhatsApp client
-function createClient() {
+// Create WhatsApp client
+async function createClient() {
     initAttempts++;
-    console.log('Init attempt:', initAttempts);
-    console.log('Creating WhatsApp client...');
+    console.log('Creating client, attempt:', initAttempts);
+    
+    // Clean old session on first attempt
+    if (initAttempts === 1) cleanSession();
     
     const chromePath = getChromePath();
-    console.log('Chrome path:', chromePath);
+    console.log('Chrome:', chromePath);
+    
+    if (client) {
+        try {
+            await client.destroy();
+        } catch (e) {}
+        client = null;
+    }
     
     client = new Client({
         authStrategy: new LocalAuth({
-            dataPath: '/tmp/whatsapp-session'
+            clientId: 'miami-' + Date.now(),
+            dataPath: '/tmp/wa-session'
         }),
         puppeteer: {
             headless: true,
@@ -60,152 +76,124 @@ function createClient() {
                 '--no-first-run',
                 '--no-zygote',
                 '--single-process',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-software-rasterizer',
-                '--disable-features=site-per-process',
-                '--disable-web-security'
+                '--disable-gpu'
             ]
-        },
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/AhmedAlaa12/niceworker/main/niceworker.json'
         }
     });
 
-    // QR Code event
     client.on('qr', async (qr) => {
-        console.log('QR Code received');
+        console.log('QR received');
         connectionStatus = 'qr_ready';
-        try {
-            qrCodeData = await QRCode.toDataURL(qr, { width: 300 });
-        } catch (err) {
-            console.error('QR generation error:', err);
-        }
+        qrCodeData = await QRCode.toDataURL(qr, { width: 280 }).catch(() => null);
     });
 
-    // Ready event
     client.on('ready', () => {
-        console.log('WhatsApp client is ready!');
+        console.log('Ready!');
         connectionStatus = 'connected';
         qrCodeData = null;
         clientInfo = client.info;
-        console.log('Connected as:', clientInfo?.pushname, clientInfo?.wid?.user);
+        console.log('Connected:', clientInfo?.pushname);
     });
 
-    // Authenticated
     client.on('authenticated', () => {
-        console.log('WhatsApp authenticated');
+        console.log('Authenticated');
         connectionStatus = 'connecting';
     });
 
-    // Auth failure
     client.on('auth_failure', (msg) => {
-        console.error('Auth failure:', msg);
+        console.log('Auth fail:', msg);
         connectionStatus = 'disconnected';
-        lastError = 'Auth failed: ' + msg;
+        lastError = msg;
     });
 
-    // Disconnected
     client.on('disconnected', (reason) => {
         console.log('Disconnected:', reason);
         connectionStatus = 'disconnected';
         clientInfo = null;
-        lastError = reason;
-        // Reconnect after delay
-        setTimeout(createClient, 5000);
     });
 
-    // Loading screen
-    client.on('loading_screen', (percent, message) => {
-        console.log('Loading:', percent + '%', message);
+    client.on('loading_screen', (pct) => {
+        console.log('Loading:', pct + '%');
         connectionStatus = 'connecting';
     });
 
-    // Initialize
-    client.initialize().catch(err => {
-        console.error('Init error:', err.message);
+    try {
+        await client.initialize();
+    } catch (err) {
+        console.log('Init error:', err.message);
         lastError = err.message;
         connectionStatus = 'error';
-    });
+    }
 }
 
 // Start
-console.log('WhatsApp service on', PORT);
+console.log('Starting WhatsApp service on port', PORT);
 createClient();
 
-// ============ API ENDPOINTS ============
+// === API ===
 
-app.get('/', (req, res) => {
-    res.json({ service: 'Miami WhatsApp', status: connectionStatus });
-});
+app.get('/', (req, res) => res.json({ service: 'Miami WhatsApp', status: connectionStatus }));
 
-app.get('/status', (req, res) => {
-    res.json({
-        status: connectionStatus,
-        qrCode: qrCodeData,
-        connectedAs: clientInfo ? { name: clientInfo.pushname, phone: clientInfo.wid?.user } : null,
-        lastError: lastError,
-        initAttempts: initAttempts
-    });
-});
+app.get('/status', (req, res) => res.json({
+    status: connectionStatus,
+    qrCode: qrCodeData,
+    connectedAs: clientInfo ? { name: clientInfo.pushname, phone: clientInfo.wid?.user } : null,
+    lastError,
+    initAttempts
+}));
 
 app.get('/qr', (req, res) => {
+    const style = 'body{background:#111b21;color:#fff;font-family:Arial;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0}';
     if (qrCodeData) {
-        res.send(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="5"><style>body{background:#111b21;color:#fff;font-family:Arial;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0}img{border-radius:10px}</style></head><body><h2>📱 Scan with WhatsApp</h2><img src="${qrCodeData}"/><p style="color:#8696a0">Auto-refreshes every 5s</p></body></html>`);
+        res.send(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="5"><style>${style}</style></head><body><h2>📱 Scan with WhatsApp</h2><img src="${qrCodeData}" style="border-radius:10px"/><p style="color:#8696a0;margin-top:20px">Refreshes in 5s</p></body></html>`);
     } else if (connectionStatus === 'connected') {
-        res.send(`<!DOCTYPE html><html><head><style>body{background:#111b21;color:#fff;font-family:Arial;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0}.ok{color:#25D366;font-size:60px}</style></head><body><div class="ok">✅</div><h2>Connected!</h2><p>${clientInfo?.pushname || ''} (${clientInfo?.wid?.user || ''})</p></body></html>`);
+        res.send(`<!DOCTYPE html><html><head><style>${style}.ok{color:#25D366;font-size:60px}</style></head><body><div class="ok">✅</div><h2>Connected!</h2><p>${clientInfo?.pushname || ''}</p></body></html>`);
     } else {
-        res.send(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="3"><style>body{background:#111b21;color:#fff;font-family:Arial;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0}</style></head><body><h2>⏳ Loading...</h2><p>Status: ${connectionStatus}</p><p>Attempt: ${initAttempts}</p></body></html>`);
+        res.send(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="3"><style>${style}</style></head><body><h2>⏳ ${connectionStatus === 'error' ? 'Error' : 'Loading...'}</h2><p>${lastError || 'Please wait...'}</p></body></html>`);
     }
 });
 
 app.post('/send', async (req, res) => {
     try {
         const { phone, message } = req.body;
-        if (!phone || !message) return res.status(400).json({ success: false, error: 'Phone and message required' });
+        if (!phone || !message) return res.status(400).json({ success: false, error: 'Missing phone/message' });
         if (connectionStatus !== 'connected') return res.status(503).json({ success: false, error: 'Not connected' });
         
-        let formattedPhone = phone.replace(/[^0-9]/g, '');
-        if (formattedPhone.startsWith('0')) formattedPhone = '88' + formattedPhone;
-        else if (!formattedPhone.startsWith('88') && formattedPhone.length === 11) formattedPhone = '88' + formattedPhone;
+        let p = phone.replace(/[^0-9]/g, '');
+        if (p.startsWith('0')) p = '88' + p;
+        else if (!p.startsWith('88') && p.length === 11) p = '88' + p;
         
-        const chatId = formattedPhone + '@c.us';
-        const isRegistered = await client.isRegisteredUser(chatId);
-        if (!isRegistered) return res.status(400).json({ success: false, error: 'Not on WhatsApp' });
+        const chatId = p + '@c.us';
+        if (!await client.isRegisteredUser(chatId)) return res.status(400).json({ success: false, error: 'Not on WhatsApp' });
         
         const result = await client.sendMessage(chatId, message);
-        res.json({ success: true, messageId: result.id._serialized, to: formattedPhone });
-    } catch (error) {
-        console.error('Send error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.json({ success: true, messageId: result.id._serialized, to: p });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
 app.post('/send-pdf', async (req, res) => {
     try {
         const { phone, message, pdfBase64, filename } = req.body;
-        if (!phone) return res.status(400).json({ success: false, error: 'Phone required' });
+        if (!phone) return res.status(400).json({ success: false, error: 'Missing phone' });
         if (connectionStatus !== 'connected') return res.status(503).json({ success: false, error: 'Not connected' });
         
-        let formattedPhone = phone.replace(/[^0-9]/g, '');
-        if (formattedPhone.startsWith('0')) formattedPhone = '88' + formattedPhone;
-        else if (!formattedPhone.startsWith('88') && formattedPhone.length === 11) formattedPhone = '88' + formattedPhone;
+        let p = phone.replace(/[^0-9]/g, '');
+        if (p.startsWith('0')) p = '88' + p;
+        else if (!p.startsWith('88') && p.length === 11) p = '88' + p;
         
-        const chatId = formattedPhone + '@c.us';
-        const isRegistered = await client.isRegisteredUser(chatId);
-        if (!isRegistered) return res.status(400).json({ success: false, error: 'Not on WhatsApp' });
+        const chatId = p + '@c.us';
+        if (!await client.isRegisteredUser(chatId)) return res.status(400).json({ success: false, error: 'Not on WhatsApp' });
         
         if (message) await client.sendMessage(chatId, message);
         if (pdfBase64) {
             const media = new MessageMedia('application/pdf', pdfBase64, filename || 'Invoice.pdf');
-            await client.sendMessage(chatId, media, { caption: filename || 'Invoice.pdf' });
+            await client.sendMessage(chatId, media);
         }
-        
-        res.json({ success: true, to: formattedPhone });
-    } catch (error) {
-        console.error('Send PDF error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.json({ success: true, to: p });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
@@ -216,21 +204,18 @@ app.post('/logout', async (req, res) => {
         clientInfo = null;
         qrCodeData = null;
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
 app.post('/restart', async (req, res) => {
-    try {
-        connectionStatus = 'initializing';
-        qrCodeData = null;
-        if (client) await client.destroy().catch(() => {});
-        setTimeout(createClient, 2000);
-        res.json({ success: true, message: 'Restarting...' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    connectionStatus = 'initializing';
+    qrCodeData = null;
+    lastError = null;
+    if (client) { try { await client.destroy(); } catch(e){} }
+    setTimeout(createClient, 1000);
+    res.json({ success: true });
 });
 
-app.listen(PORT, () => console.log('Listening on', PORT));
+app.listen(PORT);
