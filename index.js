@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(cors());
@@ -10,7 +11,6 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 8080;
 
-// Store connection state
 let qrCodeData = null;
 let connectionStatus = 'initializing';
 let clientInfo = null;
@@ -18,17 +18,17 @@ let lastError = null;
 let client = null;
 let initAttempts = 0;
 
-// Create WhatsApp client
-function createClient() {
+async function createClient() {
     console.log('Creating WhatsApp client...');
     
-    const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable';
+    // Get Chrome path from puppeteer
+    const browser = await puppeteer.launch({ headless: true });
+    const chromePath = browser.process().spawnfile;
+    await browser.close();
     console.log('Chrome path:', chromePath);
     
     return new Client({
-        authStrategy: new LocalAuth({
-            dataPath: '/tmp/whatsapp-session'
-        }),
+        authStrategy: new LocalAuth({ dataPath: '/tmp/whatsapp-session' }),
         puppeteer: {
             headless: true,
             executablePath: chromePath,
@@ -37,7 +37,6 @@ function createClient() {
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--disable-software-rasterizer',
                 '--no-first-run',
                 '--no-zygote',
                 '--single-process',
@@ -48,7 +47,6 @@ function createClient() {
     });
 }
 
-// Initialize client
 async function initializeClient() {
     if (client) {
         try { await client.destroy(); } catch (e) { console.log('Destroy error:', e.message); }
@@ -56,21 +54,26 @@ async function initializeClient() {
     
     initAttempts++;
     console.log('Init attempt:', initAttempts);
-    
-    client = createClient();
     connectionStatus = 'initializing';
     qrCodeData = null;
     lastError = null;
+    
+    try {
+        client = await createClient();
+    } catch (err) {
+        console.error('Create client error:', err.message);
+        connectionStatus = 'error';
+        lastError = err.message;
+        if (initAttempts < 3) setTimeout(initializeClient, 15000);
+        return;
+    }
     
     client.on('qr', async (qr) => {
         console.log('QR received');
         connectionStatus = 'qr_ready';
         initAttempts = 0;
-        try {
-            qrCodeData = await QRCode.toDataURL(qr, { width: 300 });
-        } catch (err) {
-            lastError = 'QR error: ' + err.message;
-        }
+        try { qrCodeData = await QRCode.toDataURL(qr, { width: 300 }); }
+        catch (err) { lastError = 'QR error: ' + err.message; }
     });
 
     client.on('ready', () => {
@@ -215,7 +218,6 @@ app.post('/restart', (req, res) => {
     setTimeout(initializeClient, 1000);
 });
 
-// Start
 app.listen(PORT, () => {
     console.log('WhatsApp service on port', PORT);
     initializeClient();
