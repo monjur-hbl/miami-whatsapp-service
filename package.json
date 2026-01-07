@@ -1,0 +1,19 @@
+{
+  "name": "miami-whatsapp-service",
+  "version": "1.0.0",
+  "description": "WhatsApp Web service for Miami Beach Resort",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "whatsapp-web.js": "^1.23.0",
+    "qrcode": "^1.5.3",
+    "puppeteer": "^21.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
